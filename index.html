@@ -186,6 +186,7 @@
           <th>Разрешение DPI</th>
           <th>Глубина цвета</th>
           <th>Сжатие</th>
+          <th>Коэффициент сжатия</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -210,6 +211,28 @@ fileInput.addEventListener('change', async (e) => {
   processBatch(fileQueue.length, 0);
 });
 
+// Функция для вычисления несжатого размера изображения
+function calculateUncompressedSize(width, height, bitsPerPixel) {
+  // Рассчитываем размер в байтах: (ширина * высота * бит на пиксель) / 8
+  return Math.ceil((width * height * bitsPerPixel) / 8);
+}
+
+// Функция для форматирования размера файла
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Б';
+  const k = 1024;
+  const sizes = ['Б', 'КБ', 'МБ', 'ГБ'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Функция для вычисления коэффициента сжатия
+function calculateCompressionRatio(compressedSize, uncompressedSize) {
+  if (uncompressedSize === 0) return '—';
+  const ratio = uncompressedSize / compressedSize;
+  return ratio.toFixed(2) + ':1';
+}
+
 async function processBatch(total, done) {
   const batch = fileQueue.splice(0, BATCH_SIZE);
 
@@ -226,17 +249,30 @@ async function processBatch(total, done) {
                      <td>—</td>
                      <td>—</td>
                      <td>—</td>
+                     <td>—</td>
                      <td>—</td>`;
     tbody.appendChild(row);
 
     const buf = await file.arrayBuffer();
     const view = new DataView(buf);
-    let dpi = "—", depth = "—";
+    let dpi = "—", depth = "—", width = 0, height = 0, bitsPerPixel = 0;
+    const compressedSize = file.size;
 
     try {
       if (ext === "jpg" || ext === "jpeg") {
         const img = new Image();
-        img.onload = () => row.cells[1].textContent = img.width + " × " + img.height;
+        img.onload = () => {
+          width = img.width;
+          height = img.height;
+          row.cells[1].textContent = width + " × " + height;
+          
+          // Вычисляем несжатый размер и коэффициент сжатия
+          bitsPerPixel = 24; // JPEG обычно 24 бита на пиксель
+          const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+          const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+          row.cells[5].textContent = compressionRatio;
+          row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
+        };
         img.src = URL.createObjectURL(file);
         depth = "24 бит";
         for (let i = 2; i < view.byteLength - 11; i++) {
@@ -255,7 +291,23 @@ async function processBatch(total, done) {
       } 
       else if (ext === "png") {
         const img = new Image();
-        img.onload = () => row.cells[1].textContent = img.width + " × " + img.height;
+        img.onload = () => {
+          width = img.width;
+          height = img.height;
+          row.cells[1].textContent = width + " × " + height;
+          
+          // Вычисляем несжатый размер и коэффициент сжатия
+          let channels = 3; // по умолчанию RGB
+          if (view.getUint32(12, false) === 0x49484452) {
+            const colorType = view.getUint8(25);
+            channels = {0:1, 2:3, 3:1, 4:2, 6:4}[colorType] || 3;
+          }
+          bitsPerPixel = channels * 8; // PNG обычно 8 бит на канал
+          const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+          const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+          row.cells[5].textContent = compressionRatio;
+          row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
+        };
         img.src = URL.createObjectURL(file);
         if (view.getUint32(12, false) === 0x49484452) {
           const bitDepth = view.getUint8(24);
@@ -277,39 +329,79 @@ async function processBatch(total, done) {
         }
       } 
       else if (ext === "gif") {
-        const w = view.getUint16(6, true);
-        const h = view.getUint16(8, true);
-        row.cells[1].textContent = w + " × " + h;
+        width = view.getUint16(6, true);
+        height = view.getUint16(8, true);
+        row.cells[1].textContent = width + " × " + height;
         const packed = view.getUint8(10);
         const n = packed & 0b00000111;
         const colors = 2 ** (n+1);
         depth = "8 бит (палитра, " + colors + " цветов)";
+        bitsPerPixel = 8;
+        
+        // Вычисляем коэффициент сжатия для GIF
+        const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+        const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+        row.cells[5].textContent = compressionRatio;
+        row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
       } 
       else if (ext === "bmp") {
-        const w = view.getInt32(18, true);
-        const h = view.getInt32(22, true);
-        row.cells[1].textContent = w + " × " + Math.abs(h);
-        const bpp = view.getUint16(28, true);
-        depth = bpp + " бит";
+        width = Math.abs(view.getInt32(18, true));
+        height = Math.abs(view.getInt32(22, true));
+        row.cells[1].textContent = width + " × " + height;
+        bitsPerPixel = view.getUint16(28, true);
+        depth = bitsPerPixel + " бит";
         const xppm = view.getInt32(38, true);
         if (xppm > 0) dpi = Math.round(xppm * 0.0254) + " dpi";
+        
+        // Для BMP вычисляем коэффициент сжатия
+        const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+        const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+        row.cells[5].textContent = compressionRatio;
+        row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
       } 
       else if (ext === "tif" || ext === "tiff") {
+        const img = new Image();
+        img.onload = () => {
+          width = img.width;
+          height = img.height;
+          row.cells[1].textContent = width + " × " + height;
+          
+          // Для TIFF предполагаем 24 бита на пиксель
+          bitsPerPixel = 24;
+          const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+          const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+          row.cells[5].textContent = compressionRatio;
+          row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
+        };
+        img.src = URL.createObjectURL(file);
         depth = "обычно 24 бит";
         dpi = "—";
-        const img = new Image();
-        img.onload = () => row.cells[1].textContent = img.width + " × " + img.height;
-        img.src = URL.createObjectURL(file);
       } 
       else if (ext === "pcx") {
-        const w = view.getUint16(8, true) - view.getUint16(4, true) + 1;
-        const h = view.getUint16(10, true) - view.getUint16(6, true) + 1;
-        row.cells[1].textContent = w + " × " + h;
-        const bpp = view.getUint8(3) * view.getUint8(65);
-        depth = bpp + " бит";
+        width = view.getUint16(8, true) - view.getUint16(4, true) + 1;
+        height = view.getUint16(10, true) - view.getUint16(6, true) + 1;
+        row.cells[1].textContent = width + " × " + height;
+        bitsPerPixel = view.getUint8(3) * view.getUint8(65);
+        depth = bitsPerPixel + " бит";
         dpi = view.getUint16(12, true) + " dpi";
+        
+        // Вычисляем коэффициент сжатия для PCX
+        const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+        const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+        row.cells[5].textContent = compressionRatio;
+        row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
       }
-    } catch(e){}
+      
+      // Для форматов, где мы не вычисляем размер через Image (GIF, BMP, PCX)
+      if ((ext === "gif" || ext === "bmp" || ext === "pcx") && width > 0 && height > 0 && bitsPerPixel > 0) {
+        const uncompressedSize = calculateUncompressedSize(width, height, bitsPerPixel);
+        const compressionRatio = calculateCompressionRatio(compressedSize, uncompressedSize);
+        row.cells[5].textContent = compressionRatio;
+        row.cells[5].title = `Сжатый: ${formatFileSize(compressedSize)}, Несжатый: ${formatFileSize(uncompressedSize)}`;
+      }
+    } catch(e){
+      console.error("Ошибка обработки файла:", file.name, e);
+    }
 
     let comp = "—";
     if (ext.includes("jpg")) comp = "JPEG";
